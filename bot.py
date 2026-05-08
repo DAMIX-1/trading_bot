@@ -496,47 +496,70 @@ def generate_signal(indicators):
 
     return signal, confidence, reasons
 # ==========================================
-# REAL TIME DATA SOURCES
+# COINGECKO - REAL TIME CRYPTO DATA
 # ==========================================
 
-async def get_binance_price(symbol: str):
-    """Get real time crypto price from Binance"""
+COINGECKO_IDS = {
+    "BTC-USD": "bitcoin",
+    "ETH-USD": "ethereum",
+    "BNB-USD": "binancecoin",
+    "SOL-USD": "solana",
+    "XRP-USD": "ripple",
+    "ADA-USD": "cardano",
+    "DOGE-USD": "dogecoin",
+    "DOT-USD": "polkadot",
+    "MATIC-USD": "matic-network",
+    "LTC-USD": "litecoin"
+}
+
+async def get_coingecko_price(symbol: str):
+    """Get real time crypto price from CoinGecko"""
     try:
-        # Convert yfinance symbol to Binance format
-        binance_symbol = symbol.replace("-USD", "USDT").replace("-", "")
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
+        coin_id = COINGECKO_IDS.get(symbol)
+        if not coin_id:
+            return None
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 data = await resp.json()
-                return float(data['price'])
+                return float(data[coin_id]['usd'])
     except:
         return None
 
-async def get_binance_klines(symbol: str, timeframe: str = "1h", limit: int = 100):
-    """Get real time crypto OHLCV data from Binance"""
+async def get_coingecko_klines(symbol: str, timeframe: str = "1h", limit: int = 100):
+    """Get crypto OHLCV data from CoinGecko"""
     try:
-        binance_symbol = symbol.replace("-USD", "USDT").replace("-", "")
-        interval_map = {
-            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
-            "1h": "1h", "4h": "4h", "1d": "1d", "1w": "1w"
+        coin_id = COINGECKO_IDS.get(symbol)
+        if not coin_id:
+            # Fall back to yfinance for unknown symbols
+            return get_market_data(symbol, timeframe)
+
+        # Map timeframe to CoinGecko days parameter
+        days_map = {
+            "1m": 1, "5m": 1, "15m": 1, "30m": 1,
+            "1h": 7, "4h": 30, "1d": 90, "1w": 365
         }
-        interval = interval_map.get(timeframe, "1h")
-        url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
+        days = days_map.get(timeframe, 7)
+
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days={days}"
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 data = await resp.json()
                 if not data or isinstance(data, dict):
                     return None
-                df = pd.DataFrame(data, columns=[
-                    'timestamp', 'Open', 'High', 'Low', 'Close', 'Volume',
-                    'close_time', 'quote_volume', 'trades', 'taker_buy_base',
-                    'taker_buy_quote', 'ignore'
-                ])
+
+                df = pd.DataFrame(data, columns=['timestamp', 'Open', 'High', 'Low', 'Close'])
                 df['Open'] = df['Open'].astype(float)
                 df['High'] = df['High'].astype(float)
                 df['Low'] = df['Low'].astype(float)
                 df['Close'] = df['Close'].astype(float)
-                df['Volume'] = df['Volume'].astype(float)
+                df['Volume'] = 0.0  # CoinGecko OHLC doesn't include volume
+
+                # Get real time price and patch last candle
+                live_price = await get_coingecko_price(symbol)
+                if live_price:
+                    df.iloc[-1, df.columns.get_loc('Close')] = live_price
+
                 return df
     except:
         return None
@@ -633,10 +656,9 @@ def is_forex(symbol: str):
 async def get_smart_market_data(symbol: str, timeframe: str = "1h"):
     """Smart data fetcher — uses best source per asset type"""
     if is_crypto(symbol):
-        # Use Binance for crypto
-        df = await get_binance_klines(symbol, timeframe, limit=100)
+        df = await get_coingecko_klines(symbol, timeframe, limit=100)
         if df is not None and not df.empty:
-            return df, "binance"
+            return df, "coingecko"
     
     if is_forex(symbol):
        # Try Twelve Data first for real time candles
@@ -712,7 +734,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = (
         f"📊 {symbol} — {timeframe.upper()} Analysis\n"
-        f"🔌 Source: {'🟢 Live (Binance)' if source == 'binance' else '🟢 Live (Twelve Data)' if source == 'twelvedata' else '🟡 Semi-Live (Forex API)' if source == 'forex' else '🟠 Delayed (Yahoo Finance)'}\n"
+        f"🔌 Source: {'🟢 Live (CoinGecko)' if source == 'coingecko' else '🟢 Live (Twelve Data)' if source == 'twelvedata' else '🟡 Semi-Live (Forex API)' if source == 'forex' else '🟠 Delayed (Yahoo Finance)'}\n"
         f"{'='*30}\n"
         f"💰 Price: ${indicators['price']}\n"
         f"📈 Trend: {trend}\n"
@@ -798,7 +820,7 @@ async def crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = "🪙 Crypto Signals\n" + "="*30 + "\n"
     for symbol in symbols:
-        df = await get_binance_klines(symbol, "1h", limit=100)
+        df = await get_coingecko_klines(symbol, "1h", limit=100)
         if df is None:
             response += f"❌ {symbol} — data unavailable\n\n"
             continue
