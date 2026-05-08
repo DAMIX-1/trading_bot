@@ -1191,7 +1191,7 @@ async def alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def check_alerts(context):
-    all_alert_records = alerts_table.all()
+    all_alert_records = alerts_col.all()
     for record in all_alert_records:
         user_id = record.get("user_id")
         user_alerts = record.get("alerts", [])
@@ -1764,26 +1764,26 @@ async def error_handler(update, context):
 # ==========================================
 def initialize_data():
     global paper_portfolios, watchlists, alerts
-    
+
     # Load portfolios
-    for record in portfolios_table.all():
+    for record in portfolios_col.find():
         user_id = record.get("user_id")
         paper_portfolios[user_id] = {
             "balance": record.get("balance", 10000.0),
             "trades": record.get("trades", []),
             "positions": record.get("positions", {})
         }
-    
+
     # Load watchlists
-    for record in watchlists_table.all():
+    for record in watchlists_col.find():
         user_id = record.get("user_id")
         watchlists[user_id] = record.get("symbols", [])
-    
+
     # Load alerts
-    for record in alerts_table.all():
+    for record in alerts_col.find():
         user_id = record.get("user_id")
         alerts[user_id] = record.get("alerts", [])
-    
+
     print(f"✅ Data loaded — {len(paper_portfolios)} portfolios, {len(watchlists)} watchlists, {len(alerts)} alert sets")
 # ==========================================
 # MAIN
