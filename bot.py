@@ -3,23 +3,25 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from tinydb import TinyDB, Query
 
 # ==========================================
-# PERSISTENT STORAGE
+# PERSISTENT STORAGE - MONGODB
 # ==========================================
 import os
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db = TinyDB(os.path.join(BASE_DIR, 'bot_data.json'))
-portfolios_table = db.table('portfolios')
-watchlists_table = db.table('watchlists')
-alerts_table = db.table('alerts')
-admins_table = db.table('admins')
-users_table = db.table('users')
-settings_table = db.table('settings')
+from pymongo import MongoClient
 
-User = Query()
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://botuser:FashinA2@tradingbot.d8jbbyz.mongodb.net/?appName=TRADINGBOT")
+
+client = MongoClient(MONGO_URI)
+mongo_db = client['trading_bot']
+
+portfolios_col = mongo_db['portfolios']
+watchlists_col = mongo_db['watchlists']
+alerts_col = mongo_db['alerts']
+admins_col = mongo_db['admins']
+users_col = mongo_db['users']
 
 # ---- PORTFOLIO ----
 def get_portfolio(user_id):
-    result = portfolios_table.get(User.user_id == user_id)
+    result = portfolios_col.find_one({"user_id": user_id})
     if not result:
         default = {
             "user_id": user_id,
@@ -27,68 +29,72 @@ def get_portfolio(user_id):
             "trades": [],
             "positions": {}
         }
-        portfolios_table.insert(default)
+        portfolios_col.insert_one(default)
         return default
     return result
 
 def save_portfolio(user_id, portfolio):
-    portfolios_table.upsert(
-        {"user_id": user_id, **portfolio},
-        User.user_id == user_id
+    portfolio.pop('_id', None)
+    portfolios_col.update_one(
+        {"user_id": user_id},
+        {"$set": portfolio},
+        upsert=True
     )
 
 # ---- WATCHLIST ----
 def get_watchlist(user_id):
-    result = watchlists_table.get(User.user_id == user_id)
+    result = watchlists_col.find_one({"user_id": user_id})
     if not result:
-        watchlists_table.insert({"user_id": user_id, "symbols": []})
         return []
     return result.get("symbols", [])
 
 def save_watchlist(user_id, symbols):
-    watchlists_table.upsert(
-        {"user_id": user_id, "symbols": symbols},
-        User.user_id == user_id
+    watchlists_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"user_id": user_id, "symbols": symbols}},
+        upsert=True
     )
 
 # ---- ALERTS ----
 def get_alerts(user_id):
-    result = alerts_table.get(User.user_id == user_id)
+    result = alerts_col.find_one({"user_id": user_id})
     if not result:
-        alerts_table.insert({"user_id": user_id, "alerts": []})
         return []
     return result.get("alerts", [])
 
 def save_alerts(user_id, user_alerts):
-    alerts_table.upsert(
-        {"user_id": user_id, "alerts": user_alerts},
-        User.user_id == user_id
+    alerts_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"user_id": user_id, "alerts": user_alerts}},
+        upsert=True
     )
 
 # ---- ADMINS ----
 def load_admins():
-    result = admins_table.get(User.user_id == "admins")
+    result = admins_col.find_one({"type": "admins"})
     if not result:
         return []
     return result.get("list", [])
 
 def save_admins(admin_list):
-    admins_table.upsert(
-        {"user_id": "admins", "list": admin_list},
-        User.user_id == "admins"
+    admins_col.update_one(
+        {"type": "admins"},
+        {"$set": {"type": "admins", "list": admin_list}},
+        upsert=True
     )
 
 # ---- USERS ----
 def load_users():
-    result = users_table.get(User.user_id == "users")
+    result = users_col.find_one({"type": "users"})
     if not result:
         return []
     return result.get("list", [])
 
 def save_users(user_list):
-    users_table.upsert(
-        {"user_id": "users", "list": user_list},
-        User.user_id == "users"
+    users_col.update_one(
+        {"type": "users"},
+        {"$set": {"type": "users", "list": user_list}},
+        upsert=True
     )
 # ==========================================
 # CONFIGURATION
