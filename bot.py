@@ -420,66 +420,45 @@ def calculate_tp_sl_trigger(df, indicators, signal):
         'rr': rr
     }
 # ==========================================
-# AI ANALYSIS LAYER - GOOGLE GEMINI
+# AI ANALYSIS LAYER - GROQ
 # ==========================================
-import google.generativeai as genai
+from groq import Groq
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAs5-JyKrKnKYyx5sG8NItnWqA240MHXoM")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 async def get_ai_analysis(symbol: str, timeframe: str, indicators: dict, signal: str, confidence: int, levels: dict, news_items: list = []):
     try:
-        # Build news context
         news_text = ""
         if news_items:
             news_text = "Recent News:\n" + "\n".join([f"• {n}" for n in news_items[:3]])
 
-        prompt = f"""
-You are a professional trading analyst. Analyze the following market data and provide:
-1. A clear interpretation of what the indicators mean
-2. The market sentiment and trend
-3. The reasoning behind the trade levels
-4. A recommended trading strategy
-5. Any risks to watch out for
+        prompt = f"""You are a professional trading analyst. Analyze the following market data and provide a concise 4-6 sentence analysis.
 
-Asset: {symbol}
-Timeframe: {timeframe}
-Current Price: ${indicators['price']}
-Signal: {signal}
-Confidence: {confidence}%
+Asset: {symbol} | Timeframe: {timeframe}
+Current Price: ${indicators['price']} | Signal: {signal} | Confidence: {confidence}%
 
 Technical Indicators:
 - RSI: {indicators['rsi']} (above 70 = overbought, below 30 = oversold)
 - MACD: {indicators['macd']} (positive = bullish, negative = bearish)
-- MA20: ${indicators['ma20']}
-- MA50: ${indicators.get('ma50', 'N/A')}
-- Bollinger Upper: ${indicators['bb_upper']}
-- Bollinger Lower: ${indicators['bb_lower']}
+- MA20: ${indicators['ma20']} | MA50: ${indicators.get('ma50', 'N/A')}
+- Bollinger Upper: ${indicators['bb_upper']} | Lower: ${indicators['bb_lower']}
 - Volume: {indicators['volume_ratio']}x average
 
 Trade Levels:
-- Trigger: ${levels['trigger']}
-- TP1: ${levels['tp1']}
-- TP2: ${levels['tp2']}
-- TP3: ${levels['tp3']}
-- Stop Loss: ${levels['sl']}
-- Risk/Reward: 1:{levels['rr']}
-- ATR: ${levels['atr']}
+- Trigger: ${levels['trigger']} | TP1: ${levels['tp1']} | TP2: ${levels['tp2']} | TP3: ${levels['tp3']}
+- Stop Loss: ${levels['sl']} | R:R: 1:{levels['rr']}
 
 {news_text}
 
-Provide a concise but comprehensive analysis in 4-6 sentences. 
-Focus on:
-- Why the signal is {signal}
-- Whether the TP/SL levels make sense given current market structure
-- Any key levels to watch
-- Overall trade quality assessment
-Keep it professional and actionable.
-"""
+Focus on: why the signal is {signal}, whether TP/SL levels make sense, key levels to watch, overall trade quality. Be professional and actionable."""
 
-        response = gemini_model.generate_content(prompt)
-        return response.text
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300
+        )
+        return response.choices[0].message.content
 
     except Exception as e:
         return f"AI analysis unavailable: {str(e)}"
@@ -487,66 +466,47 @@ Keep it professional and actionable.
 
 async def get_ai_trade_levels(symbol: str, timeframe: str, indicators: dict, signal: str, df):
     try:
-        # Calculate key support and resistance
         recent = df.tail(50)
         resistance_levels = sorted(recent['High'].nlargest(3).tolist(), reverse=True)
         support_levels = sorted(recent['Low'].nsmallest(3).tolist())
         price = indicators['price']
 
-        prompt = f"""
-You are a professional trading analyst specializing in technical analysis.
-Based on the following data, calculate the BEST stop loss, take profit levels and trigger price.
+        prompt = f"""You are a professional trading analyst. Calculate the BEST stop loss, take profit levels and trigger price.
 
-Asset: {symbol}
-Timeframe: {timeframe}
-Current Price: ${price}
-Signal: {signal}
+Asset: {symbol} | Timeframe: {timeframe} | Current Price: ${price} | Signal: {signal}
 
 Technical Data:
-- RSI: {indicators['rsi']}
-- MACD: {indicators['macd']}
-- MA20: ${indicators['ma20']}
-- MA50: ${indicators.get['ma50', 'N/A']}
-- BB Upper: ${indicators['bb_upper']}
-- BB Lower: ${indicators['bb_lower']}
-- ATR: calculated from recent candles
+- RSI: {indicators['rsi']} | MACD: {indicators['macd']}
+- MA20: ${indicators['ma20']} | MA50: ${indicators.get('ma50', 'N/A')}
+- BB Upper: ${indicators['bb_upper']} | BB Lower: ${indicators['bb_lower']}
 - Volume: {indicators['volume_ratio']}x average
+- Recent Resistance: {[round(r, 4) for r in resistance_levels]}
+- Recent Support: {[round(s, 4) for s in support_levels]}
 
-Key Price Levels:
-- Recent Resistance levels: {[round(r, 4) for r in resistance_levels]}
-- Recent Support levels: {[round(s, 4) for s in support_levels]}
-
-Rules for calculating levels:
-- For BUY signals: SL should be below nearest support, TP1/TP2/TP3 at resistance levels
-- For SELL signals: SL should be above nearest resistance, TP1/TP2/TP3 at support levels
-- Trigger should be a confirmation entry point
-- Aim for minimum 1:2 risk/reward ratio
-- Consider the timeframe ({timeframe}) for level spacing
+Rules:
+- For BUY: SL below nearest support, TP1/TP2/TP3 at resistance levels
+- For SELL: SL above nearest resistance, TP1/TP2/TP3 at support levels
+- Minimum 1:2 risk/reward ratio
+- Trigger should be confirmation entry point
 
 Respond ONLY in this exact JSON format, no other text:
-{{
-  "trigger": <price>,
-  "tp1": <price>,
-  "tp2": <price>,
-  "tp3": <price>,
-  "sl": <price>,
-  "rr": <ratio as float>,
-  "reasoning": "<brief explanation of why these levels>"
-}}
-"""
+{{"trigger": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0, "sl": 0.0, "rr": 0.0, "reasoning": "brief explanation"}}"""
 
-        response = gemini_model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # Clean JSON response
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200
+        )
+        text = response.choices[0].message.content.strip()
         text = text.replace('```json', '').replace('```', '').strip()
-        
+
         import json
         ai_levels = json.loads(text)
         return ai_levels
 
     except Exception as e:
         return None
+
 def generate_signal(indicators):
     if indicators is None:
         return "⚪ NEUTRAL", 50, ["Not enough data"]
