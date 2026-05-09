@@ -419,6 +419,134 @@ def calculate_tp_sl_trigger(df, indicators, signal):
         'atr': round(atr, 5),
         'rr': rr
     }
+# ==========================================
+# AI ANALYSIS LAYER - GOOGLE GEMINI
+# ==========================================
+import google.generativeai as genai
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAs5-JyKrKnKYyx5sG8NItnWqA240MHXoM")
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+
+async def get_ai_analysis(symbol: str, timeframe: str, indicators: dict, signal: str, confidence: int, levels: dict, news_items: list = []):
+    try:
+        # Build news context
+        news_text = ""
+        if news_items:
+            news_text = "Recent News:\n" + "\n".join([f"• {n}" for n in news_items[:3]])
+
+        prompt = f"""
+You are a professional trading analyst. Analyze the following market data and provide:
+1. A clear interpretation of what the indicators mean
+2. The market sentiment and trend
+3. The reasoning behind the trade levels
+4. A recommended trading strategy
+5. Any risks to watch out for
+
+Asset: {symbol}
+Timeframe: {timeframe}
+Current Price: ${indicators['price']}
+Signal: {signal}
+Confidence: {confidence}%
+
+Technical Indicators:
+- RSI: {indicators['rsi']} (above 70 = overbought, below 30 = oversold)
+- MACD: {indicators['macd']} (positive = bullish, negative = bearish)
+- MA20: ${indicators['ma20']}
+- MA50: ${indicators.get('ma50', 'N/A')}
+- Bollinger Upper: ${indicators['bb_upper']}
+- Bollinger Lower: ${indicators['bb_lower']}
+- Volume: {indicators['volume_ratio']}x average
+
+Trade Levels:
+- Trigger: ${levels['trigger']}
+- TP1: ${levels['tp1']}
+- TP2: ${levels['tp2']}
+- TP3: ${levels['tp3']}
+- Stop Loss: ${levels['sl']}
+- Risk/Reward: 1:{levels['rr']}
+- ATR: ${levels['atr']}
+
+{news_text}
+
+Provide a concise but comprehensive analysis in 4-6 sentences. 
+Focus on:
+- Why the signal is {signal}
+- Whether the TP/SL levels make sense given current market structure
+- Any key levels to watch
+- Overall trade quality assessment
+Keep it professional and actionable.
+"""
+
+        response = gemini_model.generate_content(prompt)
+        return response.text
+
+    except Exception as e:
+        return f"AI analysis unavailable: {str(e)}"
+
+
+async def get_ai_trade_levels(symbol: str, timeframe: str, indicators: dict, signal: str, df):
+    try:
+        # Calculate key support and resistance
+        recent = df.tail(50)
+        resistance_levels = sorted(recent['High'].nlargest(3).tolist(), reverse=True)
+        support_levels = sorted(recent['Low'].nsmallest(3).tolist())
+        price = indicators['price']
+
+        prompt = f"""
+You are a professional trading analyst specializing in technical analysis.
+Based on the following data, calculate the BEST stop loss, take profit levels and trigger price.
+
+Asset: {symbol}
+Timeframe: {timeframe}
+Current Price: ${price}
+Signal: {signal}
+
+Technical Data:
+- RSI: {indicators['rsi']}
+- MACD: {indicators['macd']}
+- MA20: ${indicators['ma20']}
+- MA50: ${indicators.get['ma50', 'N/A']}
+- BB Upper: ${indicators['bb_upper']}
+- BB Lower: ${indicators['bb_lower']}
+- ATR: calculated from recent candles
+- Volume: {indicators['volume_ratio']}x average
+
+Key Price Levels:
+- Recent Resistance levels: {[round(r, 4) for r in resistance_levels]}
+- Recent Support levels: {[round(s, 4) for s in support_levels]}
+
+Rules for calculating levels:
+- For BUY signals: SL should be below nearest support, TP1/TP2/TP3 at resistance levels
+- For SELL signals: SL should be above nearest resistance, TP1/TP2/TP3 at support levels
+- Trigger should be a confirmation entry point
+- Aim for minimum 1:2 risk/reward ratio
+- Consider the timeframe ({timeframe}) for level spacing
+
+Respond ONLY in this exact JSON format, no other text:
+{{
+  "trigger": <price>,
+  "tp1": <price>,
+  "tp2": <price>,
+  "tp3": <price>,
+  "sl": <price>,
+  "rr": <ratio as float>,
+  "reasoning": "<brief explanation of why these levels>"
+}}
+"""
+
+        response = gemini_model.generate_content(prompt)
+        text = response.text.strip()
+        
+        # Clean JSON response
+        text = text.replace('```json', '').replace('```', '').strip()
+        
+        import json
+        ai_levels = json.loads(text)
+        return ai_levels
+
+    except Exception as e:
+        return None
 def generate_signal(indicators):
     if indicators is None:
         return "⚪ NEUTRAL", 50, ["Not enough data"]
@@ -718,11 +846,27 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     indicators = calculate_indicators(df)
     if indicators is None:
-       await update.message.reply_text("❌ Not enough data for this timeframe. Try a higher timeframe like 1h or 1d.")
-       return
+        await update.message.reply_text("❌ Not enough data for this timeframe. Try a higher timeframe like 1h or 1d.")
+        return
     indicators['symbol'] = symbol
     signal_result, confidence, reasons = generate_signal(indicators)
-    levels = calculate_tp_sl_trigger(df, indicators, signal_result)
+
+# Try AI-powered trade levels first
+    ai_levels = await get_ai_trade_levels(symbol, timeframe, indicators, signal_result, df)
+    if ai_levels:
+        levels = {
+            'trigger': ai_levels.get('trigger', 0),
+            'tp1': ai_levels.get('tp1', 0),
+            'tp2': ai_levels.get('tp2', 0),
+            'tp3': ai_levels.get('tp3', 0),
+            'sl': ai_levels.get('sl', 0),
+            'rr': ai_levels.get('rr', 0),
+            'atr': calculate_tp_sl_trigger(df, indicators, signal_result)['atr']
+        }
+        ai_reasoning = ai_levels.get('reasoning', '')
+    else:
+        levels = calculate_tp_sl_trigger(df, indicators, signal_result)
+        ai_reasoning = ''
 
     # Trend strength
     if indicators['price'] > indicators['ma20']:
@@ -763,6 +907,34 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(response)
+
+    # Get AI interpretation
+    await update.message.reply_text("🤖 Getting AI analysis... please wait.")
+
+    # Fetch recent news for context
+    try:
+        ticker_news = yf.Ticker(symbol).news[:3]
+        news_items = [item.get('content', {}).get('title', '') for item in ticker_news]
+    except:
+        news_items = []
+
+    ai_analysis = await get_ai_analysis(
+        symbol, timeframe, indicators,
+        signal_result, confidence, levels, news_items
+    )
+
+    if ai_reasoning:
+        await update.message.reply_text(
+            f"📐 AI Trade Level Reasoning:\n"
+            f"{ai_reasoning}\n\n"
+            f"🤖 AI Market Analysis:\n"
+            f"{ai_analysis}"
+        )
+    else:
+        await update.message.reply_text(
+            f"🤖 AI Market Analysis:\n"
+            f"{ai_analysis}"
+        )
 # ==========================================
 # SIGNAL COMMAND (Quick signal)
 # ==========================================
