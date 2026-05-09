@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from tinydb import TinyDB, Query
@@ -424,7 +426,7 @@ def calculate_tp_sl_trigger(df, indicators, signal):
 # ==========================================
 from groq import Groq
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 async def get_ai_analysis(symbol: str, timeframe: str, indicators: dict, signal: str, confidence: int, levels: dict, news_items: list = []):
