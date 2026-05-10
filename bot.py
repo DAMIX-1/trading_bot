@@ -399,14 +399,20 @@ def calculate_tp_sl_trigger(df, indicators, signal):
         trigger = round(price * 1.001, 5)
         tp1 = round(price + (atr * 1.5), 5)
         tp2 = round(price + (atr * 2.5), 5)
-        tp3 = round(min(resistance, price + (atr * 4)), 5)
+        tp3 = round(price + (atr * 4.0), 5)
         sl = round(price - (atr * 1.2), 5)
     else:
         trigger = round(price * 0.999, 5)
         tp1 = round(price - (atr * 1.5), 5)
         tp2 = round(price - (atr * 2.5), 5)
-        tp3 = round(max(support, price - (atr * 4)), 5)
+        tp3 = round(price - (atr * 4.0), 5)
         sl = round(price + (atr * 1.2), 5)
+
+    # Ensure correct TP progression
+    if "BUY" in signal:
+        tp1, tp2, tp3 = sorted([tp1, tp2, tp3])
+    else:
+        tp1, tp2, tp3 = sorted([tp1, tp2, tp3], reverse=True)
 
     risk = abs(price - sl)
     reward = abs(tp2 - price)
@@ -838,34 +844,74 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         trend = "➡️ Neutral"
 
+        # Weighted confidence score
+    def get_signal_strength(confidence):
+        if confidence >= 80:
+            return "🔥 Very High"
+        elif confidence >= 65:
+            return "💪 High"
+        elif confidence >= 55:
+            return "👍 Medium"
+        else:
+            return "⚠️ Low"
+
+    def get_momentum_score(indicators):
+        score = 0
+        if not pd.isna(indicators['rsi']):
+            if 40 <= indicators['rsi'] <= 60:
+                score += 5
+            elif 30 <= indicators['rsi'] <= 70:
+                score += 8
+            else:
+                score += 3
+        if indicators['macd'] and not pd.isna(indicators['macd']):
+            if indicators['macd'] > 0:
+                score += 25
+        if indicators['ma50'] and not pd.isna(indicators['ma50']):
+            if indicators['price'] > indicators['ma20'] > indicators['ma50']:
+                score += 20
+            elif indicators['price'] < indicators['ma20'] < indicators['ma50']:
+                score += 20
+        if indicators['volume_ratio'] and indicators['volume_ratio'] > 1.5:
+            score += 15
+        return min(score, 100)
+
+    momentum = get_momentum_score(indicators)
+    strength = get_signal_strength(confidence)
+
+    # Market condition
+    bb_width = indicators['bb_upper'] - indicators['bb_lower']
+    bb_mid = (indicators['bb_upper'] + indicators['bb_lower']) / 2
+    bb_squeeze = bb_width / bb_mid < 0.02
+    market_condition = "↔️ Range-bound ⚠️" if bb_squeeze else "📈 Trending"
+
     response = (
-        f"📊 {symbol} — {timeframe.upper()} Analysis\n"
-        f"🔌 Source: {'🟢 Live (CoinGecko)' if source == 'coingecko' else '🟢 Live (Twelve Data)' if source == 'twelvedata' else '🟡 Semi-Live (Forex API)' if source == 'forex' else '🟠 Delayed (Yahoo Finance)'}\n"
         f"{'='*30}\n"
-        f"💰 Price: ${indicators['price']}\n"
-        f"📈 Trend: {trend}\n"
-        f"⚡ RSI: {indicators['rsi']}\n"
-        f"📉 MACD: {indicators['macd']}\n"
-        f"📈 MA20: ${indicators['ma20']}\n"
-        f"📈 MA50: ${indicators['ma50'] or 'N/A'}\n"
-        f"🎯 BB Upper: ${indicators['bb_upper']}\n"
-        f"🎯 BB Lower: ${indicators['bb_lower']}\n"
-        f"📦 Volume: {indicators['volume_ratio']}x avg\n"
+        f"📌 {symbol} • {timeframe.upper()}\n"
+        f"🔌 {('🟢 CoinGecko' if source == 'coingecko' else '🟢 Twelve Data' if source == 'twelvedata' else '🟠 Yahoo Finance')}\n"
         f"{'='*30}\n"
-        f"🔍 Reasons:\n"
+        f"{signal_result}\n"
+        f"Signal Strength: {strength}\n"
+        f"Momentum Score: {momentum}/100\n"
+        f"Market: {market_condition}\n"
+        f"{'='*30}\n"
+        f"💰 Price:    ${indicators['price']}\n"
+        f"🎯 Entry:    ${levels['trigger']}\n"
+        f"❌ SL:       ${levels['sl']}\n"
+        f"{'='*30}\n"
+        f"✅ TP1:      ${levels['tp1']}\n"
+        f"✅ TP2:      ${levels['tp2']}\n"
+        f"✅ TP3:      ${levels['tp3']}\n"
+        f"⚖️ R:R =    1:{levels['rr']}\n"
+        f"{'='*30}\n"
+        f"📊 Indicators:\n"
+        f"  RSI: {indicators['rsi']} | MACD: {'↑' if indicators['macd'] > 0 else '↓'}\n"
+        f"  MA20: ${indicators['ma20']} | MA50: ${indicators['ma50'] or 'N/A'}\n"
+        f"  ATR: ${levels['atr']} | Vol: {indicators['volume_ratio']}x\n"
+        f"{'='*30}\n"
+        f"📝 Reasons:\n"
         + "\n".join(f"  • {r}" for r in reasons) +
-        f"\n{'='*30}\n"
-        f"Signal: {signal_result}\n"
-        f"Confidence: {confidence}%\n"
-        f"{'='*30}\n"
-        f"📐 Trade Levels ({timeframe.upper()}):\n"
-        f"🎯 Trigger: ${levels['trigger']}\n"
-        f"✅ TP1: ${levels['tp1']}\n"
-        f"✅ TP2: ${levels['tp2']}\n"
-        f"✅ TP3: ${levels['tp3']}\n"
-        f"❌ SL: ${levels['sl']}\n"
-        f"📊 ATR: ${levels['atr']}\n"
-        f"⚖️ Risk/Reward: 1:{levels['rr']}"
+        f"\n{'='*30}"
     )
 
     await update.message.reply_text(response)
