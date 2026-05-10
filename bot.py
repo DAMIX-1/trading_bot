@@ -592,6 +592,84 @@ def generate_signal(indicators):
 
     return signal, confidence, reasons
 # ==========================================
+# HIGHER TIMEFRAME BIAS
+# ==========================================
+async def get_htf_bias(symbol: str, source: str):
+    try:
+        if source == "coingecko":
+            df_htf = await get_coingecko_klines(symbol, "1d", limit=100)
+        elif source == "twelvedata":
+            df_htf = await get_twelvedata_forex(symbol, "1d", limit=100)
+        else:
+            df_htf = get_market_data(symbol, "1d")
+
+        if df_htf is None or df_htf.empty:
+            return "⚪ Neutral", 0
+
+        indicators_htf = calculate_indicators(df_htf)
+        if indicators_htf is None:
+            return "⚪ Neutral", 0
+
+        # Determine bias
+        price = indicators_htf['price']
+        ma20 = indicators_htf['ma20']
+        ma50 = indicators_htf['ma50']
+        rsi = indicators_htf['rsi']
+        macd = indicators_htf['macd']
+
+        bull_score = 0
+        bear_score = 0
+
+        if ma50 and not pd.isna(ma50):
+            if price > ma20 > ma50:
+                bull_score += 2
+            elif price < ma20 < ma50:
+                bear_score += 2
+
+        if macd and not pd.isna(macd):
+            if macd > 0:
+                bull_score += 1
+            else:
+                bear_score += 1
+
+        if rsi and not pd.isna(rsi):
+            if rsi > 55:
+                bull_score += 1
+            elif rsi < 45:
+                bear_score += 1
+
+        if bull_score > bear_score:
+            return "🟢 Bullish", bull_score
+        elif bear_score > bull_score:
+            return "🔴 Bearish", bear_score
+        else:
+            return "⚪ Neutral", 0
+
+    except:
+        return "⚪ Neutral", 0
+# ==========================================
+# SESSION AWARENESS
+# ==========================================
+from datetime import datetime, timezone
+
+def get_forex_session():
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+
+    if 22 <= hour or hour < 7:
+        return "🌏 Asian Session", "Low volatility — avoid major trades"
+    elif 7 <= hour < 12:
+        return "🏦 London Session", "High volatility — best for forex"
+    elif 12 <= hour < 17:
+        return "🗽 New York Session", "High volatility — best for USD pairs"
+    elif 12 <= hour < 16:
+        return "⚡ London/NY Overlap", "Highest volatility — best opportunities"
+    else:
+        return "🌙 Off Session", "Low liquidity — be cautious"
+
+def is_forex_symbol(symbol):
+    return "=X" in symbol
+# ==========================================
 # COINGECKO - REAL TIME CRYPTO DATA
 # ==========================================
 
@@ -818,7 +896,16 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     indicators['symbol'] = symbol
     signal_result, confidence, reasons = generate_signal(indicators)
+    # Get higher timeframe bias
+    htf_bias, htf_score = await get_htf_bias(symbol, source)
 
+    # Warn if signal conflicts with HTF bias
+    htf_conflict = False
+    if "BUY" in signal_result and "Bearish" in htf_bias:
+        htf_conflict = True
+    elif "SELL" in signal_result and "Bullish" in htf_bias:
+        htf_conflict = True
+ 
 # Try AI-powered trade levels first
     ai_levels = await get_ai_trade_levels(symbol, timeframe, indicators, signal_result, df)
     if ai_levels:
@@ -880,10 +967,42 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     strength = get_signal_strength(confidence)
 
     # Market condition
+    def calculate_adx(df, period=14):
+        try:
+            high = df['High']
+            low = df['Low']
+            close = df['Close']
+            plus_dm = high.diff()
+            minus_dm = low.diff().abs()
+            plus_dm[plus_dm < 0] = 0
+            minus_dm[minus_dm < 0] = 0
+            tr = pd.concat([
+                high - low,
+                (high - close.shift()).abs(),
+                (low - close.shift()).abs()
+            ], axis=1).max(axis=1)
+            atr_adx = tr.rolling(period).mean()
+            plus_di = 100 * (plus_dm.rolling(period).mean() / atr_adx)
+            minus_di = 100 * (minus_dm.rolling(period).mean() / atr_adx)
+            dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di))
+            adx = dx.rolling(period).mean().iloc[-1]
+            return round(adx, 2)
+        except:
+            return 0
+
+    adx = calculate_adx(df)
     bb_width = indicators['bb_upper'] - indicators['bb_lower']
     bb_mid = (indicators['bb_upper'] + indicators['bb_lower']) / 2
     bb_squeeze = bb_width / bb_mid < 0.02
-    market_condition = "↔️ Range-bound ⚠️" if bb_squeeze else "📈 Trending"
+
+    if adx > 25:
+        market_condition = f"📈 Trending (ADX: {adx})"
+    elif adx < 20:
+        market_condition = f"↔️ Range-bound ⚠️ (ADX: {adx})"
+    elif bb_squeeze:
+        market_condition = f"🔒 Squeeze ⚠️ (ADX: {adx})"
+    else:
+        market_condition = f"🔄 Transitioning (ADX: {adx})"
 
     response = (
         f"{'='*30}\n"
@@ -894,6 +1013,8 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Signal Strength: {strength}\n"
         f"Momentum Score: {momentum}/100\n"
         f"Market: {market_condition}\n"
+        f"HTF Bias: {htf_bias} {'⚠️ Conflicts with signal!' if htf_conflict else '✅ Aligned'}\n"
+        f"{'📅 Session: ' + get_forex_session()[0] + ' — ' + get_forex_session()[1] if is_forex_symbol(symbol) else ''}\n"
         f"{'='*30}\n"
         f"💰 Price:    ${indicators['price']}\n"
         f"🎯 Entry:    ${levels['trigger']}\n"
