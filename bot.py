@@ -669,6 +669,29 @@ def get_forex_session():
 
 def is_forex_symbol(symbol):
     return "=X" in symbol
+def get_stock_session():
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    minute = now.minute
+    time_decimal = hour + minute / 60
+
+    # NYSE/NASDAQ hours: 9:30 AM - 4:00 PM ET (14:30 - 21:00 UTC)
+    if 14.5 <= time_decimal < 21:
+        if 14.5 <= time_decimal < 15.5:
+            return "🔔 Market Open", "First hour — high volatility, best opportunities"
+        elif 19.5 <= time_decimal < 21:
+            return "🔔 Market Close", "Last hour — high volatility, position closing"
+        else:
+            return "🟢 Market Open", "Regular trading hours — good liquidity"
+    elif 13 <= time_decimal < 14.5:
+        return "⏰ Pre-Market", "Low liquidity — avoid trading"
+    elif 21 <= time_decimal < 22:
+        return "🌙 After-Hours", "Low liquidity — avoid trading"
+    else:
+        return "🔴 Market Closed", "NYSE/NASDAQ closed — no trading"
+
+def is_stock_symbol(symbol):
+    return not is_forex_symbol(symbol) and not is_crypto(symbol) and not symbol.startswith("^") and "=F" not in symbol
 # ==========================================
 # COINGECKO - REAL TIME CRYPTO DATA
 # ==========================================
@@ -1033,7 +1056,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Momentum Score: {momentum}/100\n"
         f"Market: {market_condition}\n"
         f"HTF Bias: {htf_bias} {'⚠️ Conflicts with signal!' if htf_conflict else '✅ Aligned'}\n"
-        f"{'📅 Session: ' + get_forex_session()[0] + ' — ' + get_forex_session()[1] if is_forex_symbol(symbol) else ''}\n"
+        f"{'📅 Session: ' + get_forex_session()[0] + ' — ' + get_forex_session()[1] if is_forex_symbol(symbol) else '📅 Session: ' + get_stock_session()[0] + ' — ' + get_stock_session()[1] if is_stock_symbol(symbol) else ''}\n"
         f"{'='*30}\n"
         f"💰 Price:    ${indicators['price']}\n"
         f"🎯 Entry:    ${levels['trigger']}\n"
