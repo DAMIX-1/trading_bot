@@ -441,30 +441,37 @@ async def get_ai_analysis(symbol: str, timeframe: str, indicators: dict, signal:
         if news_items:
             news_text = "Recent News:\n" + "\n".join([f"• {n}" for n in news_items[:3]])
 
-        prompt = f"""You are a professional trading analyst. Analyze the following market data and provide a concise 4-6 sentence analysis.
+        prompt = f"""You are a professional trading analyst. Analyze the following market data and provide a concise 3 sentence analysis followed by a one sentence trade invalidation reason.
 
 Asset: {symbol} | Timeframe: {timeframe}
 Current Price: ${indicators['price']} | Signal: {signal} | Confidence: {confidence}%
 
 Technical Indicators:
-- RSI: {indicators['rsi']} (above 70 = overbought, below 30 = oversold)
-- MACD: {indicators['macd']} (positive = bullish, negative = bearish)
+- RSI: {indicators['rsi']} | MACD: {'Bullish' if indicators['macd'] > 0 else 'Bearish'}
 - MA20: ${indicators['ma20']} | MA50: ${indicators.get('ma50', 'N/A')}
-- Bollinger Upper: ${indicators['bb_upper']} | Lower: ${indicators['bb_lower']}
+- BB Upper: ${indicators['bb_upper']} | BB Lower: ${indicators['bb_lower']}
 - Volume: {indicators['volume_ratio']}x average
+- ATR: ${levels['atr']}
 
 Trade Levels:
-- Trigger: ${levels['trigger']} | TP1: ${levels['tp1']} | TP2: ${levels['tp2']} | TP3: ${levels['tp3']}
-- Stop Loss: ${levels['sl']} | R:R: 1:{levels['rr']}
+- Entry: ${levels['trigger']} | TP1: ${levels['tp1']} | TP2: ${levels['tp2']} | TP3: ${levels['tp3']}
+- SL: ${levels['sl']} | R:R: 1:{levels['rr']}
 
 {news_text}
 
-Focus on: why the signal is {signal}, whether TP/SL levels make sense, key levels to watch, overall trade quality. Be professional and actionable."""
+Respond in this exact format:
+ANALYSIS: [3 sentences max — why signal is {signal}, key levels, trade quality]
+INVALIDATION: [1 sentence — specific price level or condition that invalidates this trade]
+
+IMPORTANT: You MUST respond ONLY in this exact format with no exceptions:
+ANALYSIS: [your 3 sentence analysis here]
+INVALIDATION: [your 1 sentence invalidation here]
+Do not use asterisks, bold, headers, bullet points or any markdown formatting whatsoever."""
 
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=300
+            max_tokens=200
         )
         return response.choices[0].message.content
 
@@ -501,7 +508,7 @@ Respond ONLY in this exact JSON format, no other text:
 {{"trigger": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0, "sl": 0.0, "rr": 0.0, "reasoning": "brief explanation"}}"""
 
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200
         )
@@ -1094,18 +1101,35 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         signal_result, confidence, levels, news_items
     )
 
-    if ai_reasoning:
-        await update.message.reply_text(
-            f"📐 AI Trade Level Reasoning:\n"
-            f"{ai_reasoning}\n\n"
-            f"🤖 AI Market Analysis:\n"
-            f"{ai_analysis}"
-        )
+    # Parse AI response for analysis and invalidation
+    ai_text = ai_analysis
+    invalidation = ""
+    
+    if "INVALIDATION:" in ai_text:
+        parts = ai_text.split("INVALIDATION:")
+        ai_text = parts[0].replace("ANALYSIS:", "").strip()
+        invalidation = parts[1].strip()
     else:
-        await update.message.reply_text(
-            f"🤖 AI Market Analysis:\n"
-            f"{ai_analysis}"
-        )
+        if "BUY" in signal_result:
+            invalidation = f"Trade invalid if price closes below ${levels['sl']} stop loss level."
+        else:
+            invalidation = f"Trade invalid if price closes above ${levels['sl']} stop loss level."
+
+    # Strip markdown
+    import re
+    ai_text = re.sub(r'\*+', '', ai_text)
+    ai_text = re.sub(r'#+', '', ai_text)
+    ai_text = re.sub(r'\n{3,}', '\n\n', ai_text).strip()
+    invalidation = re.sub(r'\*+', '', invalidation).strip()
+
+    final_message = f"🤖 AI Analysis:\n{ai_text}"
+    if invalidation:
+        final_message += f"\n\n⚠️ Invalidation: {invalidation}"
+    if ai_reasoning:
+        final_message += f"\n\n📐 Level Reasoning: {ai_reasoning}"
+
+    await update.message.reply_text(final_message)
+
 # ==========================================
 # SIGNAL COMMAND (Quick signal)
 # ==========================================
