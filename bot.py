@@ -1533,7 +1533,7 @@ async def alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def check_alerts(context):
-    all_alert_records = alerts_col.all()
+    all_alert_records = alerts_col.find()
     for record in all_alert_records:
         user_id = record.get("user_id")
         user_alerts = record.get("alerts", [])
