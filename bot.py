@@ -306,14 +306,14 @@ import pandas as pd
 def get_market_data(symbol: str, timeframe: str = "1d", period: str = None):
     try:
         timeframe_map = {
-            "1m":  ("1d",  "1m"),
-            "5m":  ("60d", "5m"),
-            "15m": ("60d", "15m"),
-            "30m": ("1mo", "30m"),
-            "1h":  ("1mo", "60m"),
-            "4h":  ("3mo", "1h"),
-            "1d":  ("3mo", "1d"),
-            "1w":  ("1y",  "1wk"),
+            "1m":  ("5d",   "1m"),
+            "5m":  ("60d",  "5m"),
+            "15m": ("60d",  "15m"),
+            "30m": ("60d",  "30m"),
+            "1h":  ("3mo",  "60m"),
+            "4h":  ("6mo",  "1h"),
+            "1d":  ("1y",   "1d"),
+            "1w":  ("2y",   "1wk"),
         }
         if timeframe not in timeframe_map:
             timeframe = "1d"
@@ -701,48 +701,67 @@ async def get_coingecko_price(symbol: str):
         return None
 
 async def get_coingecko_klines(symbol: str, timeframe: str = "1h", limit: int = 100):
-    """Get crypto OHLCV data from CoinGecko"""
     try:
         coin_id = COINGECKO_IDS.get(symbol)
         if not coin_id:
-            # Fall back to yfinance for unknown symbols
             return get_market_data(symbol, timeframe)
 
-        # Map timeframe to CoinGecko days parameter
         days_map = {
-            "1m": 1, "5m": 1, "15m": 1, "30m": 1,
-            "1h": 7, "4h": 30, "1d": 90, "1w": 365
+            "1m": 1, "5m": 3, "15m": 14, "30m": 14,
+            "1h": 30, "4h": 90, "1d": 365, "1w": 730
         }
         days = days_map.get(timeframe, 7)
 
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc?vs_currency=usd&days={days}"
+        # Use market_chart for more granular data
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
+        
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 data = await resp.json()
-                if not data or isinstance(data, dict):
+                if not data or isinstance(data, dict) and 'error' in data:
                     return None
 
-                df = pd.DataFrame(data, columns=['timestamp', 'Open', 'High', 'Low', 'Close'])
-                df['Open'] = df['Open'].astype(float)
-                df['High'] = df['High'].astype(float)
-                df['Low'] = df['Low'].astype(float)
-                df['Close'] = df['Close'].astype(float)
-                df['Volume'] = 0.0  # CoinGecko OHLC doesn't include volume
+                prices = data.get('prices', [])
+                if not prices:
+                    return None
 
-                # Get real time price and patch last candle
+                df = pd.DataFrame(prices, columns=['timestamp', 'Close'])
+                df['Open'] = df['Close'].shift(1).fillna(df['Close'])
+                df['High'] = df['Close']
+                df['Low'] = df['Close']
+                df['Volume'] = 0.0
+                df['Close'] = df['Close'].astype(float)
+
+                # Resample to requested timeframe
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df = df.set_index('timestamp')
+
+                resample_map = {
+                    "1m": "1min", "5m": "5min", "15m": "15min",
+                    "30m": "30min", "1h": "1h", "4h": "4h",
+                    "1d": "1D", "1w": "1W"
+                }
+                rule = resample_map.get(timeframe, "1h")
+                df = df['Close'].resample(rule).ohlc()
+                df.columns = ['Open', 'High', 'Low', 'Close']
+                df['Volume'] = 0.0
+                df = df.dropna().reset_index(drop=True)
+
+                # Patch last price with live price
                 live_price = await get_coingecko_price(symbol)
                 if live_price:
                     df.iloc[-1, df.columns.get_loc('Close')] = live_price
 
                 return df
-    except:
+
+    except Exception as e:
         return None
 # ==========================================
 # TWELVE DATA - REAL TIME FOREX
 # ==========================================
 TWELVE_DATA_API_KEY = "1d1882b4fc4e43bf801a3565473d1dbc"
 
-async def get_twelvedata_forex(symbol: str, timeframe: str = "1h", limit: int = 100):
+async def get_twelvedata_forex(symbol: str, timeframe: str = "1h", limit: int = 200):
     """Get real time forex candles from Twelve Data"""
     try:
         # Convert yfinance forex symbol to Twelve Data format
