@@ -579,7 +579,19 @@ def generate_signal(indicators):
         if indicators['rsi'] > 80:
             score -= 1
             reasons.append("RSI extremely overbought ⚠️")
-
+    # Price structure filter — check higher highs/lower lows
+    # This prevents signal flipping in choppy markets
+    if score > 0 and score < 2:
+        signal = "⚪ NEUTRAL"
+        confidence = 50
+        reasons.append("Weak signal — waiting for stronger confirmation")
+        return signal, confidence, reasons
+    elif score < 0 and score > -2:
+        signal = "⚪ NEUTRAL"
+        confidence = 50
+        reasons.append("Weak signal — waiting for stronger confirmation")
+        return signal, confidence, reasons
+    
     # Final signal
     if score >= 3:
         signal = "🟢 STRONG BUY"
@@ -598,6 +610,52 @@ def generate_signal(indicators):
         confidence = 50
 
     return signal, confidence, reasons
+# ==========================================
+# SIGNAL CONFIRMATION FILTER
+# ==========================================
+signal_history = {}
+
+def get_confirmed_signal(symbol: str, timeframe: str, new_signal: str, confidence: int):
+    key = f"{symbol}_{timeframe}"
+    
+    if key not in signal_history:
+        signal_history[key] = {
+            "signal": new_signal,
+            "confidence": confidence,
+            "count": 1,
+            "confirmed": False
+        }
+        return new_signal, confidence, False
+
+    history = signal_history[key]
+    current_signal = history["signal"]
+
+    # Check if signal direction has changed
+    current_direction = "BUY" if "BUY" in current_signal else "SELL" if "SELL" in current_signal else "NEUTRAL"
+    new_direction = "BUY" if "BUY" in new_signal else "SELL" if "SELL" in new_signal else "NEUTRAL"
+
+    if new_direction == current_direction:
+        # Same direction — increase confirmation count
+        history["count"] += 1
+        history["signal"] = new_signal
+        history["confidence"] = confidence
+        if history["count"] >= 2:
+            history["confirmed"] = True
+    else:
+        # Direction changed — reset counter
+        history["count"] = 1
+        history["signal"] = new_signal
+        history["confidence"] = confidence
+        history["confirmed"] = False
+
+    signal_history[key] = history
+    confirmed = history["confirmed"]
+
+    # If not yet confirmed return previous signal with warning
+    if not confirmed and history["count"] < 2:
+        return new_signal, confidence, False
+    
+    return new_signal, confidence, confirmed
 # ==========================================
 # HIGHER TIMEFRAME BIAS
 # ==========================================
@@ -945,6 +1003,12 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     indicators['symbol'] = symbol
     signal_result, confidence, reasons = generate_signal(indicators)
+
+    # Apply confirmation filter
+    signal_result, confidence, is_confirmed = get_confirmed_signal(
+        symbol, timeframe, signal_result, confidence
+    )
+    confirmation_text = "✅ Confirmed" if is_confirmed else "⏳ Awaiting confirmation"
     # Get higher timeframe bias
     htf_bias, htf_score = await get_htf_bias(symbol, source)
 
@@ -1060,6 +1124,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'='*30}\n"
         f"{signal_result}\n"
         f"Signal Strength: {strength}\n"
+        f"Confirmation: {confirmation_text}\n"
         f"Momentum Score: {momentum}/100\n"
         f"Market: {market_condition}\n"
         f"HTF Bias: {htf_bias} {'⚠️ Conflicts with signal!' if htf_conflict else '✅ Aligned'}\n"
@@ -1176,7 +1241,52 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ SL: ${levels['sl']}\n"
         f"⚖️ Risk/Reward: 1:{levels['rr']}"
     )
+# ==========================================
+# SIGNAL CONFIRMATION FILTER
+# ==========================================
+signal_history = {}
 
+def get_confirmed_signal(symbol: str, timeframe: str, new_signal: str, confidence: int):
+    key = f"{symbol}_{timeframe}"
+    
+    if key not in signal_history:
+        signal_history[key] = {
+            "signal": new_signal,
+            "confidence": confidence,
+            "count": 1,
+            "confirmed": False
+        }
+        return new_signal, confidence, False
+
+    history = signal_history[key]
+    current_signal = history["signal"]
+
+    # Check if signal direction has changed
+    current_direction = "BUY" if "BUY" in current_signal else "SELL" if "SELL" in current_signal else "NEUTRAL"
+    new_direction = "BUY" if "BUY" in new_signal else "SELL" if "SELL" in new_signal else "NEUTRAL"
+
+    if new_direction == current_direction:
+        # Same direction — increase confirmation count
+        history["count"] += 1
+        history["signal"] = new_signal
+        history["confidence"] = confidence
+        if history["count"] >= 2:
+            history["confirmed"] = True
+    else:
+        # Direction changed — reset counter
+        history["count"] = 1
+        history["signal"] = new_signal
+        history["confidence"] = confidence
+        history["confirmed"] = False
+
+    signal_history[key] = history
+    confirmed = history["confirmed"]
+
+    # If not yet confirmed return previous signal with warning
+    if not confirmed and history["count"] < 2:
+        return new_signal, confidence, False
+    
+    return new_signal, confidence, confirmed
 # ==========================================
 # CRYPTO COMMAND
 # ==========================================
