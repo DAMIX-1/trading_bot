@@ -1022,20 +1022,26 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Try AI-powered trade levels first
     ai_levels = await get_ai_trade_levels(symbol, timeframe, indicators, signal_result, df)
     if ai_levels:
+        math_levels = calculate_tp_sl_trigger(df, indicators, signal_result)
         levels = {
-            'trigger': ai_levels.get('trigger', 0),
-            'tp1': ai_levels.get('tp1', 0),
-            'tp2': ai_levels.get('tp2', 0),
-            'tp3': ai_levels.get('tp3', 0),
-            'sl': ai_levels.get('sl', 0),
-            'rr': ai_levels.get('rr', 0),
-            'atr': calculate_tp_sl_trigger(df, indicators, signal_result)['atr']
+            'trigger': ai_levels.get('trigger') or math_levels['trigger'],
+            'tp1': ai_levels.get('tp1') or math_levels['tp1'],
+            'tp2': ai_levels.get('tp2') or math_levels['tp2'],
+            'tp3': ai_levels.get('tp3') or math_levels['tp3'],
+            'sl': ai_levels.get('sl') or math_levels['sl'],
+            'rr': ai_levels.get('rr') or math_levels['rr'],
+            'atr': math_levels['atr']
         }
         ai_reasoning = ai_levels.get('reasoning', '')
     else:
         levels = calculate_tp_sl_trigger(df, indicators, signal_result)
         ai_reasoning = ''
-
+        
+    # Ensure correct TP progression
+    if "BUY" in signal_result:
+        levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']])
+    else:
+        levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']], reverse=True)
     # Trend strength
     if indicators['price'] > indicators['ma20']:
         trend = "📈 Bullish"
