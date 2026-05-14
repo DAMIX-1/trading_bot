@@ -1009,6 +1009,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol, timeframe, signal_result, confidence
     )
     confirmation_text = "✅ Confirmed" if is_confirmed else "⏳ Awaiting confirmation"
+    ai_reasoning = ''
     # Get higher timeframe bias
     htf_bias, htf_score = await get_htf_bias(symbol, source)
 
@@ -1021,27 +1022,59 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
  
 # Try AI-powered trade levels first
     ai_levels = await get_ai_trade_levels(symbol, timeframe, indicators, signal_result, df)
+    math_levels = calculate_tp_sl_trigger(df, indicators, signal_result)
+    atr = math_levels['atr']
     if ai_levels:
-        math_levels = calculate_tp_sl_trigger(df, indicators, signal_result)
-        levels = {
-            'trigger': ai_levels.get('trigger') or math_levels['trigger'],
-            'tp1': ai_levels.get('tp1') or math_levels['tp1'],
-            'tp2': ai_levels.get('tp2') or math_levels['tp2'],
-            'tp3': ai_levels.get('tp3') or math_levels['tp3'],
-            'sl': ai_levels.get('sl') or math_levels['sl'],
-            'rr': ai_levels.get('rr') or math_levels['rr'],
-            'atr': math_levels['atr']
-        }
-        ai_reasoning = ai_levels.get('reasoning', '')
+        # Validate AI levels make sense
+        ai_trigger = ai_levels.get('trigger') or 0
+        ai_tp1 = ai_levels.get('tp1') or 0
+        ai_tp2 = ai_levels.get('tp2') or 0
+        ai_tp3 = ai_levels.get('tp3') or 0
+        ai_sl = ai_levels.get('sl') or 0
+        price = indicators['price']
+
+        # Check if AI levels are valid
+        valid = True
+        if "BUY" in signal_result:
+            if ai_sl >= price:
+                valid = False
+            if ai_tp1 <= price or ai_tp2 <= price or ai_tp3 <= price:
+                valid = False
+            if ai_tp1 == ai_tp2 or ai_tp2 == ai_tp3 or ai_tp1 == ai_tp3:
+                valid = False
+            if abs(ai_tp1 - ai_tp2) < atr * 0.5:
+                valid = False
+        else:
+            if ai_sl <= price:
+                valid = False
+            if ai_tp1 >= price or ai_tp2 >= price or ai_tp3 >= price:
+                valid = False
+            if ai_tp1 == ai_tp2 or ai_tp2 == ai_tp3 or ai_tp1 == ai_tp3:
+                valid = False
+            if abs(ai_tp1 - ai_tp2) < atr * 0.5:
+                valid = False
+
+        if valid:
+            levels = {
+                'trigger': ai_trigger or math_levels['trigger'],
+                'tp1': ai_tp1,
+                'tp2': ai_tp2,
+                'tp3': ai_tp3,
+                'sl': ai_sl,
+                'rr': ai_levels.get('rr') or math_levels['rr'],
+                'atr': math_levels['atr']
+            }
+            # Ensure correct TP progression
+            if "BUY" in signal_result:
+                levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']])
+            else:
+                levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']], reverse=True)
+        else:
+            levels = math_levels
+            ai_reasoning = "Math levels used — AI levels failed validation"
     else:
-        levels = calculate_tp_sl_trigger(df, indicators, signal_result)
-        ai_reasoning = ''
+        levels = math_levels
         
-    # Ensure correct TP progression
-    if "BUY" in signal_result:
-        levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']])
-    else:
-        levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']], reverse=True)
     # Trend strength
     if indicators['price'] > indicators['ma20']:
         trend = "📈 Bullish"
@@ -1064,22 +1097,32 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def get_momentum_score(indicators):
         score = 0
         if not pd.isna(indicators['rsi']):
-            if 40 <= indicators['rsi'] <= 60:
-                score += 5
-            elif 30 <= indicators['rsi'] <= 70:
+            if indicators['rsi'] < 30 or indicators['rsi'] > 70:
+                score += 20
+            elif 30 <= indicators['rsi'] <= 40 or 60 <= indicators['rsi'] <= 70:
+                score += 15
+            elif 40 <= indicators['rsi'] <= 60:
                 score += 8
-            else:
-                score += 3
         if indicators['macd'] and not pd.isna(indicators['macd']):
             if indicators['macd'] > 0:
                 score += 25
+            else:
+                score += 10
         if indicators['ma50'] and not pd.isna(indicators['ma50']):
             if indicators['price'] > indicators['ma20'] > indicators['ma50']:
-                score += 20
+                score += 25
             elif indicators['price'] < indicators['ma20'] < indicators['ma50']:
+                score += 25
+            else:
+                score += 10
+        if indicators['volume_ratio'] and not pd.isna(indicators['volume_ratio']):
+            if indicators['volume_ratio'] > 1.5:
                 score += 20
-        if indicators['volume_ratio'] and indicators['volume_ratio'] > 1.5:
-            score += 15
+            elif indicators['volume_ratio'] > 1.0:
+                score += 10
+        if indicators['bb_lower'] and not pd.isna(indicators['bb_lower']):
+            if indicators['price'] <= indicators['bb_lower'] or indicators['price'] >= indicators['bb_upper']:
+                score += 10
         return min(score, 100)
 
     momentum = get_momentum_score(indicators)
