@@ -2308,6 +2308,262 @@ async def resetportfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💵 Balance restored to $10,000.00"
     )
 # ==========================================
+# ONCHAIN ANALYSIS
+# ==========================================
+@restricted
+async def onchain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /onchain [CONTRACT ADDRESS]\n\n"
+            "Examples:\n"
+            "• /onchain 0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984 (ETH/BSC)\n"
+            "• /onchain DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB25 (Solana)"
+        )
+        return
+
+    address = context.args[0].strip()
+    chain_type = detect_chain(address)
+
+    if not chain_type:
+        await update.message.reply_text("❌ Invalid contract address format.")
+        return
+
+    await update.message.reply_text(f"🔍 Analyzing on-chain data for {address[:8]}...{address[-6:]} please wait.")
+
+    info = []
+    warnings = []
+    opportunities = []
+    score = 0
+
+    try:
+        # ---- DEX SCREENER DATA ----
+        pair = await check_dexscreener(address)
+        token_name = "Unknown"
+        token_symbol = "Unknown"
+        price = "N/A"
+        liquidity = 0
+        volume_24h = 0
+        price_change_24h = 0
+        price_change_1h = 0
+        chain = "Unknown"
+        dex = "Unknown"
+        fdv = 0
+        market_cap = 0
+
+        if pair:
+            token_name = pair.get('baseToken', {}).get('name', 'Unknown')
+            token_symbol = pair.get('baseToken', {}).get('symbol', 'Unknown')
+            price = pair.get('priceUsd', 'N/A')
+            liquidity = pair.get('liquidity', {}).get('usd', 0)
+            volume_24h = pair.get('volume', {}).get('h24', 0)
+            volume_1h = pair.get('volume', {}).get('h1', 0)
+            price_change_24h = pair.get('priceChange', {}).get('h24', 0)
+            price_change_1h = pair.get('priceChange', {}).get('h1', 0)
+            price_change_6h = pair.get('priceChange', {}).get('h6', 0)
+            chain = pair.get('chainId', 'Unknown').upper()
+            dex = pair.get('dexId', 'Unknown').upper()
+            fdv = pair.get('fdv', 0)
+            market_cap = pair.get('marketCap', 0)
+            txns_24h = pair.get('txns', {}).get('h24', {})
+            buys_24h = txns_24h.get('buys', 0)
+            sells_24h = txns_24h.get('sells', 0)
+
+            info.append(f"🏷 {token_name} (${token_symbol})")
+            info.append(f"⛓ Chain: {chain} | DEX: {dex}")
+            info.append(f"💰 Price: ${price}")
+            info.append(f"💧 Liquidity: ${liquidity:,.0f}")
+            info.append(f"📊 24h Volume: ${volume_24h:,.0f}")
+            info.append(f"📈 1h Change: {price_change_1h}% | 6h: {price_change_6h}% | 24h: {price_change_24h}%")
+            info.append(f"🔄 24h Txns: {buys_24h} buys / {sells_24h} sells")
+            if fdv:
+                info.append(f"💎 FDV: ${fdv:,.0f}")
+            if market_cap:
+                info.append(f"🏦 Market Cap: ${market_cap:,.0f}")
+
+            # Opportunity signals
+            if buys_24h > sells_24h * 1.5:
+                opportunities.append("🟢 Strong buy pressure — more buys than sells")
+                score += 2
+            elif sells_24h > buys_24h * 1.5:
+                opportunities.append("🔴 Strong sell pressure — more sells than buys")
+                score -= 2
+
+            if price_change_1h > 5:
+                opportunities.append(f"🚀 Price pumping +{price_change_1h}% in 1h")
+                score += 1
+            elif price_change_1h < -5:
+                opportunities.append(f"📉 Price dropping {price_change_1h}% in 1h")
+                score -= 1
+
+            if volume_24h > liquidity * 2:
+                opportunities.append("🔥 Very high volume relative to liquidity")
+                score += 1
+
+            if liquidity < 10000:
+                warnings.append("⚠️ Very low liquidity — high slippage risk")
+                score -= 2
+            elif liquidity < 50000:
+                warnings.append("⚠️ Low liquidity — trade carefully")
+                score -= 1
+
+        # ---- GOPLUS SECURITY DATA ----
+        if chain_type == "eth_bsc":
+            security = await check_goplus_evm(address, "1")
+            if not security:
+                security = await check_goplus_evm(address, "56")
+        else:
+            security = await check_goplus_solana(address)
+
+        if security:
+            if security.get('is_honeypot') == '1':
+                warnings.append("🚨 HONEYPOT — Cannot sell this token")
+                score -= 10
+
+            if security.get('is_mintable') == '1':
+                warnings.append("⚠️ Mintable — Dev can inflate supply")
+                score -= 2
+
+            owner = security.get('owner_address', '')
+            if owner and owner != '0x0000000000000000000000000000000000000000':
+                warnings.append("⚠️ Ownership not renounced")
+                score -= 1
+            else:
+                opportunities.append("✅ Ownership renounced")
+                score += 1
+
+            try:
+                buy_tax = float(security.get('buy_tax', 0))
+                sell_tax = float(security.get('sell_tax', 0))
+                info.append(f"💸 Tax: Buy {buy_tax}% / Sell {sell_tax}%")
+                if buy_tax > 10 or sell_tax > 10:
+                    warnings.append(f"⚠️ High tax — Buy:{buy_tax}% Sell:{sell_tax}%")
+                    score -= 2
+                elif buy_tax == 0 and sell_tax == 0:
+                    opportunities.append("✅ Zero tax token")
+                    score += 1
+            except:
+                pass
+
+            if security.get('is_blacklisted') == '1':
+                warnings.append("⚠️ Blacklist function exists")
+                score -= 1
+
+            if security.get('is_open_source') == '1':
+                opportunities.append("✅ Contract verified")
+                score += 1
+            else:
+                warnings.append("⚠️ Contract not verified")
+                score -= 1
+
+            holders = security.get('holders', [])
+            if holders:
+                top_pct = float(holders[0].get('percent', 0)) * 100
+                info.append(f"👤 Top holder: {top_pct:.1f}%")
+                if top_pct > 50:
+                    warnings.append(f"🚨 Top holder owns {top_pct:.1f}% — extreme concentration")
+                    score -= 3
+                elif top_pct > 20:
+                    warnings.append(f"⚠️ Top holder owns {top_pct:.1f}%")
+                    score -= 1
+                else:
+                    opportunities.append(f"✅ Good distribution — top holder {top_pct:.1f}%")
+                    score += 1
+
+            lp_holders = security.get('lp_holders', [])
+            locked = any(h.get('is_locked') == 1 for h in lp_holders)
+            if locked:
+                opportunities.append("✅ Liquidity locked")
+                score += 2
+            elif lp_holders:
+                warnings.append("⚠️ Liquidity NOT locked")
+                score -= 2
+
+        # ---- AI INTERPRETATION ----
+        await update.message.reply_text("🤖 Getting AI interpretation... please wait.")
+
+        info_text = "\n".join(info)
+        warnings_text = "\n".join(warnings) if warnings else "None"
+        opportunities_text = "\n".join(opportunities) if opportunities else "None"
+
+        ai_prompt = f"""You are a crypto on-chain analyst. Analyze this token data and give a concise 3 sentence assessment.
+
+Token: {token_name} (${token_symbol})
+Contract: {address[:8]}...{address[-6:]}
+Chain: {chain}
+
+Data:
+{info_text}
+
+Red Flags:
+{warnings_text}
+
+Positive Signals:
+{opportunities_text}
+
+Overall Score: {score}
+
+Provide:
+ANALYSIS: [3 sentences — overall assessment, key risks or opportunities, recommendation]
+VERDICT: [one of: STRONG BUY / BUY / NEUTRAL / AVOID / STRONG AVOID]
+
+No markdown, no bold text."""
+
+        try:
+            ai_response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": ai_prompt}],
+                max_tokens=200
+            )
+            ai_text = ai_response.choices[0].message.content.strip()
+            ai_text = re.sub(r'\*+', '', ai_text)
+            ai_text = re.sub(r'#+', '', ai_text)
+        except:
+            ai_text = f"ANALYSIS: Token shows {'positive' if score > 0 else 'concerning'} on-chain metrics with a score of {score}.\nVERDICT: {'BUY' if score > 2 else 'NEUTRAL' if score > -2 else 'AVOID'}"
+
+        # Parse verdict
+        verdict = "⚪ NEUTRAL"
+        if "STRONG BUY" in ai_text.upper():
+            verdict = "🟢 STRONG BUY"
+        elif "STRONG AVOID" in ai_text.upper():
+            verdict = "🔴 STRONG AVOID"
+        elif "BUY" in ai_text.upper() and "AVOID" not in ai_text.upper():
+            verdict = "🟡 BUY"
+        elif "AVOID" in ai_text.upper():
+            verdict = "🟠 AVOID"
+
+        analysis = ai_text.replace("ANALYSIS:", "").replace("VERDICT:", "").strip()
+        if "STRONG BUY" in analysis.upper() or "STRONG AVOID" in analysis.upper() or "NEUTRAL" in analysis.upper():
+            analysis = analysis.split("\n")[0].strip()
+
+        # ---- BUILD RESPONSE ----
+        response = (
+            f"🔍 On-Chain Analysis\n"
+            f"{'='*30}\n"
+            f"📋 {address[:8]}...{address[-6:]}\n"
+            + "\n".join(info) +
+            f"\n{'='*30}\n"
+        )
+
+        if opportunities:
+            response += "✅ Positives:\n"
+            for o in opportunities:
+                response += f"  {o}\n"
+
+        if warnings:
+            response += "\n⚠️ Red Flags:\n"
+            for w in warnings:
+                response += f"  {w}\n"
+
+        response += f"\n{'='*30}\n"
+        response += f"Verdict: {verdict}\n"
+        response += f"Score: {score:+d}/10"
+
+        await update.message.reply_text(response)
+        await update.message.reply_text(f"🤖 AI Analysis:\n{analysis}")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error during analysis: {str(e)}")
+# ==========================================
 # AUTO SIGNAL BROADCASTER
 # ==========================================
 broadcast_active = False
@@ -2529,6 +2785,7 @@ if __name__ == "__main__":
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("viewalerts", viewalerts))
     app.add_handler(CommandHandler("resetportfolio", resetportfolio))
+    app.add_handler(CommandHandler("onchain", onchain))
     print("Bot is running! Press Ctrl+C to stop.")
     app.job_queue.run_repeating(check_alerts, interval=60, first=10)
     app.job_queue.run_repeating(run_broadcast, interval=broadcast_interval * 60, first=30)
