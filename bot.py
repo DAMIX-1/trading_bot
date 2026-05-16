@@ -557,7 +557,7 @@ def generate_signal(indicators):
         score += 2
         reasons.append("RSI oversold 📉")
     elif indicators['rsi'] > 70:
-        score -= 2
+        score -= 1
         reasons.append("RSI overbought 📈")
     else:
         reasons.append(f"RSI neutral ({indicators['rsi']})")
@@ -597,21 +597,11 @@ def generate_signal(indicators):
 
     # RSI overbought add-on
     if indicators['rsi'] and not pd.isna(indicators['rsi']):
-        if indicators['rsi'] > 80:
+        if indicators['rsi'] > 85:
             score -= 1
             reasons.append("RSI extremely overbought ⚠️")
     # Price structure filter — check higher highs/lower lows
     # This prevents signal flipping in choppy markets
-    if score > 0 and score < 2:
-        signal = "⚪ NEUTRAL"
-        confidence = 50
-        reasons.append("Weak signal — waiting for stronger confirmation")
-        return signal, confidence, reasons
-    elif score < 0 and score > -2:
-        signal = "⚪ NEUTRAL"
-        confidence = 50
-        reasons.append("Weak signal — waiting for stronger confirmation")
-        return signal, confidence, reasons
     
     # Final signal
     if score >= 3:
