@@ -486,26 +486,46 @@ async def get_ai_trade_levels(symbol: str, timeframe: str, indicators: dict, sig
         support_levels = sorted(recent['Low'].nsmallest(3).tolist())
         price = indicators['price']
 
-        prompt = f"""You are a professional trading analyst. Calculate the BEST stop loss, take profit levels and trigger price.
+        direction = "BUY" if "BUY" in signal else "SELL"
+        
+        if direction == "BUY":
+            direction_rules = f"""
+This is a BUY trade. Current price is ${price}.
+- Trigger: slightly above ${price} (entry confirmation)
+- SL: MUST be a number LESS THAN ${price} (below current price)
+- TP1: MUST be a number GREATER THAN ${price} (above current price)
+- TP2: MUST be GREATER THAN TP1
+- TP3: MUST be GREATER THAN TP2
+Example: if price=${price}, SL could be ${round(price*0.985, 4)}, TP1 could be ${round(price*1.01, 4)}"""
+        else:
+            direction_rules = f"""
+This is a SELL trade. Current price is ${price}.
+- Trigger: slightly below ${price} (entry confirmation)  
+- SL: MUST be a number GREATER THAN ${price} (above current price)
+- TP1: MUST be a number LESS THAN ${price} (below current price)
+- TP2: MUST be LESS THAN TP1
+- TP3: MUST be LESS THAN TP2
+Example: if price=${price}, SL could be ${round(price*1.015, 4)}, TP1 could be ${round(price*0.99, 4)}"""
 
-Asset: {symbol} | Timeframe: {timeframe} | Current Price: ${price} | Signal: {signal}
+        prompt = f"""You are a professional trading analyst. Calculate precise trade levels.
+
+Asset: {symbol} | Timeframe: {timeframe} | Signal: {signal}
+Current Price: ${price}
+
+{direction_rules}
 
 Technical Data:
 - RSI: {indicators['rsi']} | MACD: {indicators['macd']}
 - MA20: ${indicators['ma20']} | MA50: ${indicators.get('ma50', 'N/A')}
 - BB Upper: ${indicators['bb_upper']} | BB Lower: ${indicators['bb_lower']}
-- Volume: {indicators['volume_ratio']}x average
 - Recent Resistance: {[round(r, 4) for r in resistance_levels]}
 - Recent Support: {[round(s, 4) for s in support_levels]}
 
-Rules:
-- For BUY: SL below nearest support, TP1/TP2/TP3 at resistance levels
-- For SELL: SL above nearest resistance, TP1/TP2/TP3 at support levels
-- Minimum 1:2 risk/reward ratio
-- Trigger should be confirmation entry point
+Use the support/resistance levels above to determine realistic TP targets.
+Aim for minimum 1:2 risk/reward ratio.
 
-Respond ONLY in this exact JSON format, no other text:
-{{"trigger": 0.0, "tp1": 0.0, "tp2": 0.0, "tp3": 0.0, "sl": 0.0, "rr": 0.0, "reasoning": "brief explanation"}}"""
+Respond ONLY in this exact JSON format with no other text:
+{{"trigger": <number>, "tp1": <number>, "tp2": <number>, "tp3": <number>, "sl": <number>, "rr": <number>, "reasoning": "<brief explanation>"}}"""
 
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -517,6 +537,7 @@ Respond ONLY in this exact JSON format, no other text:
 
         import json
         ai_levels = json.loads(text)
+        print(f"AI levels returned: {ai_levels}")
         return ai_levels
 
     except Exception as e:
@@ -775,7 +796,10 @@ COINGECKO_IDS = {
 }
 
 async def get_coingecko_price(symbol: str):
-    """Get real time crypto price from CoinGecko"""
+    cache_key = f"price_{symbol}"
+    cached = get_cached_data(cache_key)
+    if cached is not None:
+        return cached
     try:
         coin_id = COINGECKO_IDS.get(symbol)
         if not coin_id:
@@ -783,67 +807,119 @@ async def get_coingecko_price(symbol: str):
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
-                data = await resp.json()
-                return float(data[coin_id]['usd'])
+                data = await rate_limited_coingecko_get(url)
+                price = float(data[coin_id]['usd'])
+                set_cached_data(cache_key, price)
+                return price
+    except:
+        return None
+# ==========================================
+# COINGECKO CACHE
+# ==========================================
+coingecko_cache = {}
+CACHE_DURATION = 600  # 10 minutes
+
+import time
+
+def get_cached_data(key):
+    if key in coingecko_cache:
+        data, timestamp = coingecko_cache[key]
+        if time.time() - timestamp < CACHE_DURATION:
+            return data
+    return None
+
+def set_cached_data(key, data):
+    coingecko_cache[key] = (data, time.time())
+last_coingecko_call = 0
+COINGECKO_RATE_LIMIT = 10  # seconds between calls
+
+async def rate_limited_coingecko_get(url: str):
+    global last_coingecko_call
+    now = time.time()
+    wait_time = COINGECKO_RATE_LIMIT - (now - last_coingecko_call)
+    if wait_time > 0:
+        await asyncio.sleep(wait_time)
+    last_coingecko_call = time.time()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 429:
+                    await asyncio.sleep(15)
+                    return None
+                return await resp.json()
     except:
         return None
 
 async def get_coingecko_klines(symbol: str, timeframe: str = "1h", limit: int = 100):
-    try:
-        coin_id = COINGECKO_IDS.get(symbol)
-        if not coin_id:
-            return get_market_data(symbol, timeframe)
+    for attempt in range(3):
+        # Check cache first
+        cache_key = f"{symbol}_{timeframe}"
+        cached = get_cached_data(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            coin_id = COINGECKO_IDS.get(symbol)
+            if not coin_id:
+                return get_market_data(symbol, timeframe)
 
-        days_map = {
-            "1m": 1, "5m": 3, "15m": 14, "30m": 14,
-            "1h": 30, "4h": 90, "1d": 365, "1w": 730
-        }
-        days = days_map.get(timeframe, 7)
+            days_map = {
+                "1m": 1, "5m": 3, "15m": 14, "30m": 14,
+                "1h": 30, "4h": 90, "1d": 365, "1w": 730
+            }
+            days = days_map.get(timeframe, 7)
 
-        # Use market_chart for more granular data
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
+            # Use market_chart for more granular data
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days={days}"
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                data = await resp.json()
-                if not data or isinstance(data, dict) and 'error' in data:
-                    return None
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    data = await rate_limited_coingecko_get(url)
+                    if data is None:
+                        continue  # retry
+                    if not data or isinstance(data, dict) and 'error' in data:
+                        return None
 
-                prices = data.get('prices', [])
-                if not prices:
-                    return None
+                    prices = data.get('prices', [])
+                    if not prices:
+                        return None
 
-                df = pd.DataFrame(prices, columns=['timestamp', 'Close'])
-                df['Open'] = df['Close'].shift(1).fillna(df['Close'])
-                df['High'] = df['Close']
-                df['Low'] = df['Close']
-                df['Volume'] = 0.0
-                df['Close'] = df['Close'].astype(float)
+                    df = pd.DataFrame(prices, columns=['timestamp', 'Close'])
+                    df['Open'] = df['Close'].shift(1).fillna(df['Close'])
+                    df['High'] = df['Close']
+                    df['Low'] = df['Close']
+                    df['Volume'] = 0.0
+                    df['Close'] = df['Close'].astype(float)
 
-                # Resample to requested timeframe
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp')
+                    # Resample to requested timeframe
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df = df.set_index('timestamp')
 
-                resample_map = {
-                    "1m": "1min", "5m": "5min", "15m": "15min",
-                    "30m": "30min", "1h": "1h", "4h": "4h",
-                    "1d": "1D", "1w": "1W"
-                }
-                rule = resample_map.get(timeframe, "1h")
-                df = df['Close'].resample(rule).ohlc()
-                df.columns = ['Open', 'High', 'Low', 'Close']
-                df['Volume'] = 0.0
-                df = df.dropna().reset_index(drop=True)
+                    resample_map = {
+                        "1m": "1min", "5m": "5min", "15m": "15min",
+                        "30m": "30min", "1h": "1h", "4h": "4h",
+                        "1d": "1D", "1w": "1W"
+                    }
+                    rule = resample_map.get(timeframe, "1h")
+                    df = df['Close'].resample(rule).ohlc()
+                    df.columns = ['Open', 'High', 'Low', 'Close']
+                    df['Volume'] = 0.0
+                    df = df.dropna().reset_index(drop=True)
 
-                # Patch last price with live price
-                live_price = await get_coingecko_price(symbol)
-                if live_price:
-                    df.iloc[-1, df.columns.get_loc('Close')] = live_price
-
-                return df
-
-    except Exception as e:
-        return None
+                    # Patch last price with live price
+                    live_price = await get_coingecko_price(symbol)
+                    if live_price:
+                        df.iloc[-1, df.columns.get_loc('Close')] = live_price
+                    
+                    # Cache the result
+                    set_cached_data(cache_key, df)
+                    return df
+                
+        except Exception as e:
+            if attempt < 2:
+                import asyncio
+                await asyncio.sleep(5)
+                continue
+            return None
 # ==========================================
 # TWELVE DATA - REAL TIME FOREX
 # ==========================================
@@ -1025,55 +1101,52 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     math_levels = calculate_tp_sl_trigger(df, indicators, signal_result)
     atr = math_levels['atr']
     if ai_levels:
-        # Validate AI levels make sense
-        ai_trigger = ai_levels.get('trigger') or 0
-        ai_tp1 = ai_levels.get('tp1') or 0
-        ai_tp2 = ai_levels.get('tp2') or 0
-        ai_tp3 = ai_levels.get('tp3') or 0
-        ai_sl = ai_levels.get('sl') or 0
         price = indicators['price']
+        atr = math_levels['atr']
+        ai_trigger = float(ai_levels.get('trigger') or price)
+    if ai_levels:
+        atr = math_levels['atr']
+        ai_trigger = float(ai_levels.get('trigger') or price)
+        ai_tp1 = float(ai_levels.get('tp1') or 0)
+        ai_tp2 = float(ai_levels.get('tp2') or 0)
+        ai_tp3 = float(ai_levels.get('tp3') or 0)
+        ai_sl = float(ai_levels.get('sl') or 0)
+        ai_rr = float(ai_levels.get('rr') or 0)
 
-        # Check if AI levels are valid
-        valid = True
         if "BUY" in signal_result:
+            # Auto correct any wrong levels
             if ai_sl >= price:
-                valid = False
-            if ai_tp1 <= price or ai_tp2 <= price or ai_tp3 <= price:
-                valid = False
-            if ai_tp1 == ai_tp2 or ai_tp2 == ai_tp3 or ai_tp1 == ai_tp3:
-                valid = False
-            if abs(ai_tp1 - ai_tp2) < atr * 0.5:
-                valid = False
+                ai_sl = math_levels['sl']
+            if ai_tp1 <= price:
+                ai_tp1 = math_levels['tp1']
+            if ai_tp2 <= ai_tp1:
+                ai_tp2 = math_levels['tp2']
+            if ai_tp3 <= ai_tp2:
+                ai_tp3 = math_levels['tp3']
         else:
+            # Auto correct SELL levels
             if ai_sl <= price:
-                valid = False
-            if ai_tp1 >= price or ai_tp2 >= price or ai_tp3 >= price:
-                valid = False
-            if ai_tp1 == ai_tp2 or ai_tp2 == ai_tp3 or ai_tp1 == ai_tp3:
-                valid = False
-            if abs(ai_tp1 - ai_tp2) < atr * 0.5:
-                valid = False
+                ai_sl = math_levels['sl']
+            if ai_tp1 >= price:
+                ai_tp1 = math_levels['tp1']
+            if ai_tp2 >= ai_tp1:
+                ai_tp2 = math_levels['tp2']
+            if ai_tp3 >= ai_tp2:
+                ai_tp3 = math_levels['tp3']
 
-        if valid:
-            levels = {
-                'trigger': ai_trigger or math_levels['trigger'],
-                'tp1': ai_tp1,
-                'tp2': ai_tp2,
-                'tp3': ai_tp3,
-                'sl': ai_sl,
-                'rr': ai_levels.get('rr') or math_levels['rr'],
-                'atr': math_levels['atr']
-            }
-            # Ensure correct TP progression
-            if "BUY" in signal_result:
-                levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']])
-            else:
-                levels['tp1'], levels['tp2'], levels['tp3'] = sorted([levels['tp1'], levels['tp2'], levels['tp3']], reverse=True)
-        else:
-            levels = math_levels
-            ai_reasoning = "Math levels used — AI levels failed validation"
+        levels = {
+            'trigger': ai_trigger,
+            'tp1': ai_tp1,
+            'tp2': ai_tp2,
+            'tp3': ai_tp3,
+            'sl': ai_sl,
+            'rr': ai_rr or math_levels['rr'],
+            'atr': math_levels['atr']
+        }
+        ai_reasoning = ai_levels.get('reasoning', '')
     else:
         levels = math_levels
+        ai_reasoning = ''
         
     # Trend strength
     if indicators['price'] > indicators['ma20']:
@@ -1165,7 +1238,35 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         market_condition = f"🔒 Squeeze ⚠️ (ADX: {adx})"
     else:
         market_condition = f"🔄 Transitioning (ADX: {adx})"
-
+    if "NEUTRAL" in signal_result:
+        response = (
+            f"{'='*30}\n"
+            f"📌 {symbol} • {timeframe.upper()}\n"
+            f"🔌 {('🟢 CoinGecko' if source == 'coingecko' else '🟢 Twelve Data' if source == 'twelvedata' else '🟠 Yahoo Finance')}\n"
+            f"{'='*30}\n"
+            f"{signal_result}\n"
+            f"Signal Strength: {strength}\n"
+            f"Confirmation: {confirmation_text}\n"
+            f"Momentum Score: {momentum}/100\n"
+            f"Market: {market_condition}\n"
+            f"HTF Bias: {htf_bias} {'⚠️ Conflicts with signal!' if htf_conflict else '✅ Aligned'}\n"
+            f"{'📅 Session: ' + get_forex_session()[0] + ' — ' + get_forex_session()[1] if is_forex_symbol(symbol) else '📅 Session: ' + get_stock_session()[0] + ' — ' + get_stock_session()[1] if is_stock_symbol(symbol) else ''}\n"
+            f"{'='*30}\n"
+            f"💰 Price: ${indicators['price']}\n"
+            f"{'='*30}\n"
+            f"📊 Indicators:\n"
+            f"  RSI: {indicators['rsi']} | MACD: {'↑' if indicators['macd'] > 0 else '↓'}\n"
+            f"  MA20: ${indicators['ma20']} | MA50: ${indicators['ma50'] or 'N/A'}\n"
+            f"  ATR: ${levels['atr']} | Vol: {indicators['volume_ratio']}x\n"
+            f"{'='*30}\n"
+            f"📝 Reasons:\n"
+            + "\n".join(f"  • {r}" for r in reasons) +
+            f"\n{'='*30}\n"
+            f"⏳ No trade setup — wait for stronger signal"
+        )
+        await update.message.reply_text(response)
+        return
+    
     response = (
         f"{'='*30}\n"
         f"📌 {symbol} • {timeframe.upper()}\n"
@@ -1241,7 +1342,8 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         final_message += f"\n\n⚠️ Invalidation: {invalidation}"
     if ai_reasoning:
         final_message += f"\n\n📐 Level Reasoning: {ai_reasoning}"
-
+    else:
+        final_message += f"\n\n📐 Level Reasoning: AI-calculated levels based on support/resistance structure and {signal_result} momentum."
     await update.message.reply_text(final_message)
 
 # ==========================================
@@ -1941,6 +2043,7 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 # RUG CHECK VIA CONTRACT ADDRESS
 # ==========================================
+import asyncio
 import aiohttp
 import re
 
