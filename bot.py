@@ -20,6 +20,7 @@ watchlists_col = mongo_db['watchlists']
 alerts_col = mongo_db['alerts']
 admins_col = mongo_db['admins']
 users_col = mongo_db['users']
+coin_ids_col = mongo_db['coin_ids']
 
 # ---- PORTFOLIO ----
 def get_portfolio(user_id):
@@ -784,6 +785,63 @@ COINGECKO_IDS = {
     "MATIC-USD": "matic-network",
     "LTC-USD": "litecoin"
 }
+# Cache for dynamic coin lookups
+coin_id_cache = {}
+
+async def get_coingecko_id(symbol: str):
+    """Dynamically find CoinGecko ID for any crypto symbol"""
+    if symbol in COINGECKO_IDS:
+        return COINGECKO_IDS[symbol]
+    
+    clean_symbol = symbol.replace("-USD", "").replace("-USDT", "").upper()
+    
+    # Check memory cache first
+    if clean_symbol in coin_id_cache:
+        return coin_id_cache[clean_symbol]
+    
+    # Check MongoDB cache
+    try:
+        cached = coin_ids_col.find_one({"symbol": clean_symbol})
+        if cached:
+            coin_id_cache[clean_symbol] = cached['coin_id']
+            return cached['coin_id']
+    except Exception as e:
+        pass
+    
+    # Search CoinGecko
+    try:
+        url = f"https://api.coingecko.com/api/v3/search?query={clean_symbol}"
+        data = await rate_limited_coingecko_get(url)
+        if not data:
+            return None
+        
+        coins = data.get('coins', [])
+        if not coins:
+            return None
+        
+        # Find best match — prefer exact symbol match
+        coin_id = None
+        for coin in coins[:10]:
+            if coin.get('symbol', '').upper() == clean_symbol:
+                coin_id = coin['id']
+                break
+        
+        if not coin_id:
+            coin_id = coins[0]['id']
+        
+       # Save to memory and MongoDB
+        coin_id_cache[clean_symbol] = coin_id
+        try:
+            coin_ids_col.update_one(
+                {"symbol": clean_symbol},
+                {"$set": {"symbol": clean_symbol, "coin_id": coin_id}},
+                upsert=True
+            )
+        except Exception as e:
+            return coin_id
+        
+    except:
+        return None
 
 async def get_coingecko_price(symbol: str):
     cache_key = f"price_{symbol}"
@@ -791,7 +849,7 @@ async def get_coingecko_price(symbol: str):
     if cached is not None:
         return cached
     try:
-        coin_id = COINGECKO_IDS.get(symbol)
+        coin_id = await get_coingecko_id(symbol)
         if not coin_id:
             return None
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
@@ -848,7 +906,7 @@ async def get_coingecko_klines(symbol: str, timeframe: str = "1h", limit: int = 
         if cached is not None:
             return cached
         try:
-            coin_id = COINGECKO_IDS.get(symbol)
+            coin_id = await get_coingecko_id(symbol)
             if not coin_id:
                 return get_market_data(symbol, timeframe)
 
@@ -995,7 +1053,7 @@ FOREX_PAIRS = [
 ]
 
 def is_crypto(symbol: str):
-    return symbol in CRYPTO_SYMBOLS or symbol.endswith("-USD") and not symbol.startswith("^")
+    return (symbol.endswith("-USD") or symbol.endswith("-USDT")) and not symbol.startswith("^") and "=X" not in symbol and "=F" not in symbol
 
 def is_forex(symbol: str):
     return "=X" in symbol
